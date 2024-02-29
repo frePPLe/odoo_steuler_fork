@@ -74,6 +74,11 @@ class importer(object):
     def run(self):
         msg = []
         if self.actual_user:
+            product_product = self.env["product.product"].with_user(self.actual_user)
+            product_supplierinfo = self.env["product.supplierinfo"].with_user(
+                self.actual_user
+            )
+            uom_uom = self.env["uom.uom"].with_user(self.actual_user)
             proc_order = self.env["purchase.order"].with_user(self.actual_user)
             proc_orderline = self.env["purchase.order.line"].with_user(self.actual_user)
             mfg_order = self.env["mrp.production"].with_user(self.actual_user)
@@ -93,6 +98,9 @@ class importer(object):
                 self.actual_user
             )
         else:
+            product_product = self.env["product.product"]
+            product_supplierinfo = self.env["product.supplierinfo"]
+            uom_uom = self.env["uom.uom"]
             proc_order = self.env["purchase.order"]
             proc_orderline = self.env["purchase.order.line"]
             mfg_order = self.env["mrp.production"]
@@ -166,13 +174,31 @@ class importer(object):
                     st = elem.get("start")
                     if st:
                         try:
-                            wo["start"] = datetime.strptime(st, "%Y-%m-%d %H:%M:%S")
+                            wo["start"] = (
+                                self.timezone.localize(
+                                    datetime.strptime(
+                                        st,
+                                        "%Y-%m-%d %H:%M:%S",
+                                    )
+                                )
+                                .astimezone(UTC)
+                                .replace(tzinfo=None)
+                            )
                         except Exception:
                             pass
                     nd = elem.get("end")
                     if st:
                         try:
-                            wo["end"] = datetime.strptime(nd, "%Y-%m-%d %H:%M:%S")
+                            wo["end"] = (
+                                self.timezone.localize(
+                                    datetime.strptime(
+                                        nd,
+                                        "%Y-%m-%d %H:%M:%S",
+                                    )
+                                )
+                                .astimezone(UTC)
+                                .replace(tzinfo=None)
+                            )
                         except Exception:
                             pass
                     wo_data.append(wo)
@@ -201,13 +227,27 @@ class importer(object):
                         quantity = float(elem.get("quantity"))
                         date_planned = elem.get("end")
                         if date_planned:
-                            date_planned = datetime.strptime(
-                                date_planned, "%Y-%m-%d %H:%M:%S"
+                            date_planned = (
+                                self.timezone.localize(
+                                    datetime.strptime(
+                                        date_planned,
+                                        "%Y-%m-%d %H:%M:%S",
+                                    )
+                                )
+                                .astimezone(UTC)
+                                .replace(tzinfo=None)
                             )
                         date_ordered = elem.get("start")
                         if date_ordered:
-                            date_ordered = datetime.strptime(
-                                date_ordered, "%Y-%m-%d %H:%M:%S"
+                            date_ordered = (
+                                self.timezone.localize(
+                                    datetime.strptime(
+                                        date_ordered,
+                                        "%Y-%m-%d %H:%M:%S",
+                                    )
+                                )
+                                .astimezone(UTC)
+                                .replace(tzinfo=None)
                             )
 
                         # Is that an update of an existing PO ?
@@ -271,10 +311,8 @@ class importer(object):
                                 ] = date_ordered
 
                         if (item_id, supplier_id) not in product_supplier_dict:
-                            product = self.env["product.product"].browse(int(item_id))
-                            product_supplierinfo = self.env[
-                                "product.supplierinfo"
-                            ].search(
+                            product = product_product.browse(int(item_id))
+                            supplier = product_supplierinfo.search(
                                 [
                                     ("partner_id", "=", supplier_id),
                                     (
@@ -287,21 +325,30 @@ class importer(object):
                                 limit=1,
                                 order="min_qty desc",
                             )
-                            if product_supplierinfo:
-                                price_unit = product_supplierinfo.price
-                            else:
-                                price_unit = 0
+                            product_uom = uom_uom.browse(int(uom_id))
+                            # first create a minimal PO line
                             po_line = proc_orderline.create(
                                 {
                                     "order_id": supplier_reference[supplier_id]["id"],
                                     "product_id": int(item_id),
                                     "product_qty": quantity,
                                     "product_uom": int(uom_id),
-                                    "date_planned": date_planned,
-                                    "price_unit": price_unit,
-                                    "name": elem.get("item"),
                                 }
                             )
+                            # Then let odoo computes all the fields (taxes, name, description...)
+
+                            d = po_line._prepare_purchase_order_line(
+                                product,
+                                quantity,
+                                product_uom,
+                                self.company,
+                                supplier,
+                                po,
+                            )
+                            d["date_planned"] = date_planned
+                            # Finally update the PO line
+                            po_line.write(d)
+
                             # Aggregation of quantities under the same PO line
                             # only happens in incremental export
                             if self.mode == 2:
@@ -375,12 +422,19 @@ class importer(object):
                             continue
 
                         if date_shipping:
-                            date_shipping = datetime.strptime(
-                                date_shipping, "%Y-%m-%d %H:%M:%S"
+                            date_shipping = (
+                                self.timezone.localize(
+                                    datetime.strptime(
+                                        date_shipping,
+                                        "%Y-%m-%d %H:%M:%S",
+                                    )
+                                )
+                                .astimezone(UTC)
+                                .replace(tzinfo=None)
                             )
                         else:
-                            date_shipping = datetime.strptime(
-                                datetime.now(), "%Y-%m-%d %H:%M:%S"
+                            date_shipping = (
+                                datetime.now().astimezone(UTC).replace(tzinfo=None)
                             )
                         if not hasattr(self, "stock_picking_dict"):
                             self.stock_picking_dict = {}
@@ -554,18 +608,21 @@ class importer(object):
                             # Remember odoo name for the MO reference passed by frepple.
                             # This mapping is later used when importing WO.
                             mo_references[elem.get("reference")] = mo
-                            mo._onchange_workorder_ids()
-                            mo._onchange_move_raw()
                             mo._create_update_move_finished()
                             # Steuler: export MO in confirmed status
                             mo.action_confirm()
                             # mo._plan_workorders() # plan MO
                             # mo.action_assign() # reserve material
+                            create = True
                         else:
                             # MO update
-                            mo = mfg_order.with_context(context).search(
-                                [("name", "=", elem.get("reference"))]
-                            )[0]
+                            create = False
+                            try:
+                                mo = mfg_order.with_context(context).search(
+                                    [("name", "=", elem.get("reference"))]
+                                )
+                            except Exception:
+                                continue
                             if mo:
                                 new_qty = float(elem.get("quantity"))
                                 if mo.product_qty != new_qty:
@@ -589,7 +646,9 @@ class importer(object):
                         if wo_data:
                             for wo in mo.workorder_ids:
                                 for rec in wo_data:
-                                    if rec["id"] == wo.id:
+                                    if (create and rec["id"] == wo.operation_id.id) or (
+                                        not create and rec["id"] == wo.id
+                                    ):
                                         # By default odoo populates the scheduled start date field only when you confirm and plan
                                         # the manufacturing order.
                                         # Here we are already updating it earlier
@@ -599,29 +658,84 @@ class importer(object):
                                                 .astimezone(UTC)
                                                 .replace(tzinfo=None)
                                             )
+                                            if not create:
+                                                wo.write(
+                                                    {
+                                                        "date_planned_start": wo.date_planned_start
+                                                    }
+                                                )
                                         if "end" in rec:
                                             wo.date_planned_finished = (
                                                 self.timezone.localize(rec["end"])
                                                 .astimezone(UTC)
                                                 .replace(tzinfo=None)
                                             )
+                                            if not create:
+                                                wo.write(
+                                                    {
+                                                        "date_planned_finished": wo.date_planned_finished
+                                                    }
+                                                )
                                         for res in rec["workcenters"]:
-                                            if res["id"] != wo.workcenter_id.id:
-                                                wc = mfg_workcenter.browse(res["id"])
-                                                if wo.workcenter_id == wc[0].owner:
-                                                    wo.workcenter_id = res["id"]
-                                                else:
-                                                    mfg_workorder_secondary.create(
-                                                        {
-                                                            "workcenter_id": res["id"],
-                                                            "workorder_id": wo.id,
-                                                            "duration": res["quantity"]
-                                                            * wo.duration_expected,
-                                                        }
+                                            wc = mfg_workcenter.browse(res["id"])
+                                            if not wc:
+                                                continue
+                                            if create:
+                                                if res["id"] != wo.workcenter_id.id:
+                                                    if wo.workcenter_id == wc[0].owner:
+                                                        wo.workcenter_id = res["id"]
+                                                    else:
+                                                        mfg_workorder_secondary.create(
+                                                            {
+                                                                "workcenter_id": res[
+                                                                    "id"
+                                                                ],
+                                                                "workorder_id": wo.id,
+                                                                "duration": res[
+                                                                    "quantity"
+                                                                ]
+                                                                * wo.duration_expected,
+                                                            }
+                                                        )
+                                            else:
+                                                if (
+                                                    not wo.operation_id  # No operation defined
+                                                    or (
+                                                        wo.operation_id.workcenter_id
+                                                        == wc  # Same workcenter
+                                                        or (
+                                                            # New member of a pool
+                                                            wo.operation_id.workcenter_id
+                                                            and wo.operation_id.workcenter_id
+                                                            == wc.owner
+                                                        )
                                                     )
+                                                ):
+                                                    # Change primary work center
+                                                    wo.write({"workcenter_id": wc.id})
+                                                else:
+                                                    # Check assigned secondary resources
+                                                    for sec in wo.secondary_workcenters:
+                                                        if (
+                                                            sec.workcenter_id.owner
+                                                            == wc
+                                                        ):
+                                                            break
+                                                        if (
+                                                            sec.workcenter_id.owner
+                                                            == wc.owner
+                                                        ):
+                                                            # Change secondary work center
+                                                            sec.write(
+                                                                {"workcenter_id": wc.id}
+                                                            )
+                                                            break
 
                         countmfg += 1
                 except Exception as e:
+                    import traceback
+
+                    logger.info(traceback.format_exc())
                     logger.error("Exception %s" % e)
                     msg.append(str(e))
                 # Remove the element now to keep the DOM tree small
