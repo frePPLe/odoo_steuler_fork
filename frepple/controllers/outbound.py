@@ -2419,8 +2419,8 @@ class exporter(object):
                         and wo.workcenter_id
                         and wo.operation_id.workcenter_id
                         and wo.operation_id.workcenter_id.id in self.map_workcenters
-                        and wo.workcenter_id.owner
-                        and wo.workcenter_id.owner == wo.operation_id.workcenter_id
+                        # and wo.workcenter_id.owner
+                        # and wo.workcenter_id.owner == wo.operation_id.workcenter_id
                     ):
                         # Only send a load definition if the bom specifies a parent pool
                         yield "<loads><load><resource name=%s/></load></loads>" % quoteattr(
@@ -2437,11 +2437,10 @@ class exporter(object):
                             if (
                                 not wo_sec.workcenter_id
                                 or wo_sec.workcenter_id.id not in self.map_workcenters
-                                or wo_sec.workcenter_id == wo.workcenter_id
                             ):
                                 continue
                             for sec in wo.operation_id.secondary_workcenter:
-                                if (
+                                if wo_sec.workcenter_id == sec.workcenter_id or (
                                     wo_sec.workcenter_id.owner
                                     and wo_sec.workcenter_id.owner == sec.workcenter_id
                                 ):
